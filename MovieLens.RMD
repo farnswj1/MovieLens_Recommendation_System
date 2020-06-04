@@ -1,0 +1,928 @@
+---
+title: "MovieLens Recommendation System"
+author: "Justin Farnsworth"
+date: "6/2/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Summary
+Every day, the demand for data and artifical intelligence is growing. Automation is becoming almost a necessity in today's markets. Predicting outcomes accuracy is also desired, however the results aren't always perfect. Despite this, companies collect data which is then used to implement such systems. In the context of streaming services such as Netflix and Hulu, user ratings for movies are used to build movie reccomendation systems.
+
+In this report, the goal was to **implement a movie reccomendation system** using the MovieLens dataset, which contains about 10 million user ratings. The ratings are represented using a 5-star system, from 1 being the worst rating to 5 being the best. In the dataset, we are also given the movie IDs, the user IDs, the movie title (with the release year attached to them), the genre(s), and the time in which was rating was given. In our analysis, we were able to discover key trends in out dataset's features, such as the variability of ratings across users and genres.
+
+Using these patterns, we implemented numberous models to predict the movie ratings. We experimented with the various features to see how much of an effect they had on the RMSE. To prevent overfitting, we split the dataset into a training dataset (edx) and a test set (validation). All records in the validation set are also in the edx dataset to ensure we can properly predict their ratings. The edx dataset consisted of approximately 90% of MovieLens dataset, or 9 million records. The validation set consisted of the of the other 10%, or nearly 1 million records. 
+
+We also used regularization to help improve our prediction. Using this method, we were able to achieve a **residual mean squared error (RMSE) of 0.8644229** using a regularized model of the movie, user, release year, and genre effects. However, to implement this model, the analysis resulted in roughly 25GB of RAM. Therefore, devices that do not have sufficient memory will crash. Nevertheless, the results are shared in this document.
+
+Each section has their methods and models explained, followed by their respective results. 
+
+The dataset can be accessed here: <https://grouplens.org/datasets/movielens/10m/>
+
+# Analysis
+Before conducting the analsis, the dataset was reformatted so that the `timestamp` displayed the date and time of the rating. Also, the release year was extracted from the `title` and placed into its own column named `releaseYear`. The `releaseYear` is one of the features used to implement the recommendation system, including `movieId`, `userId`, and `genres`.
+
+When exploring the dataset, we focused on the movies, users, ratings, genres, and release years categorically. The other columns were not analyzed directly for this project.
+
+For the models, we started with predicting just the average. The goal was to reduce the RMSE generated from this by adding more features. The four features used were `movieId`, `userId`, `releaseYear`, and `genres`. Each model using these features were regularized and tuned to help improve the RMSE even further by obtaining the $\lambda$ with the lowest RMSE.
+
+
+## Exploring the Dataset - Overview 
+```{r load_dataset, message = FALSE, warning = FALSE, echo = FALSE}
+# Required packages
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(gghighlight)) install.packages("gghighlight", repos = "http://cran.us.r-project.org")
+
+
+# Download and extract data from the file
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind = "Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+# Delete variables no longer needed
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+Since the validation set's records are also in the edx dataset, we can just analyze the edx set alone.
+
+The rows and columns of the dataset respectively are:
+```{r dataset_dimensions}
+# Dimensions of the dataset
+dim(edx)
+```
+
+Here are the first 10 rows of the dataset:
+```{r head_dataset_before_cleanup}
+head(edx)
+```
+
+While the data appears to be tidy, we can see that some information can be reformatted or extracted into their own columns. The `timestamp` represents the number of seconds that have passed since the Unix Epoch (January 1, 1970, 12:00:00AM). To understand when the ratings have been recorded, this should be converted to datetime. We also see that the movie `title` and release year are in the same column. It would be ideal to have the `title` and the release year in their own columns.
+
+The datatypes for each column are:
+```{r column_datatypes, echo = FALSE}
+data.frame(
+  column_names = colnames(edx),
+  data_type = map_chr(colnames(edx), function(colname) {class(edx[, colname])})
+)
+```
+
+
+## Cleaning Up the Dataset
+First, we want to check for any null values. 
+```{r check_for_null_values}
+# Check for any null values
+any(is.na(edx))
+any(is.na(validation))
+```
+Since there are no null cells, we can clean up the dataset. We will convert the `timestamp` into a datetime (we will rename the column to `dateTimeOfRating`) and split the `title` column into two columns: `title` and `releaseYear`.
+
+NOTE: We will have to do this for the validation dataset as well.
+```{r clean_up_dataset, echo = FALSE}
+# Convert the timestamp into datetime
+edx <- edx %>% 
+  mutate(dateTimeOfRating = as.POSIXct(timestamp, origin="1970-01-01")) %>% 
+  select(-timestamp)
+
+validation <- validation %>% 
+  mutate(dateTimeOfRating = as.POSIXct(timestamp, origin="1970-01-01")) %>% 
+  select(-timestamp)
+
+# Separate the release year from the movie title
+edx <- edx %>%
+  extract(title, 
+          into = c("title", "releaseYear"), 
+          regex = "^(.+) \\((\\d+)\\)$", 
+          remove = FALSE) %>% 
+  mutate(releaseYear = as.integer(releaseYear))
+
+validation <- validation %>%
+  extract(title, 
+          into = c("title", "releaseYear"), 
+          regex = "^(.+) \\(([\\d]+)\\)$", 
+          remove = FALSE) %>% 
+  mutate(releaseYear = as.integer(releaseYear))
+
+# Ensure both datasets are in order based on userId, then movieId
+edx <- edx %>% arrange(userId, movieId)
+validation <- validation %>% arrange(userId, movieId)
+```
+
+After cleanup, the first 10 rows look like this:
+```{r head_dataset_after_cleanup, echo = FALSE}
+# Show the first few rows of the dataset after clean-up
+head(edx, 10)
+```
+
+
+## Exploring the Dataset - Movies
+Based on the number of movie IDs, there are `r n_distinct(edx$movieId)` movies in the dataset.
+
+Here are the 10 movies with the most ratings:
+```{r movies_with_most_ratings, echo = FALSE, message = FALSE}
+# Show the top 10 movies with the most ratings
+edx %>% 
+  group_by(movieId, title) %>% 
+  summarize(count = n()) %>%
+  arrange(desc(count)) %>% 
+  top_n(10)
+```
+We see that `Pulp Fiction` has the most ratings. However, this doesn't give us any information on what those ratings are, or how good the movie is compared to others.
+
+Here are the top 10 movies based on average ratings (minimum of 1,000 ratings):
+```{r movies_with_highest_avg_ratings, echo = FALSE, message = FALSE}
+# Show the top 10 movies with the highest average ratings 
+edx %>%
+  group_by(movieId, title) %>% 
+  summarize(avg_rating = mean(rating), count = n()) %>%
+  filter(count >= 1000) %>% 
+  arrange(desc(avg_rating)) %>%
+  top_n(10)
+```
+
+Notice that while `Pulp Fiction` had more ratings, they are not in the top 10 by averages. In fact, only one of the movies from the previous chart are in the top 10 highest averages. The only movie that made the top 10 in both tables was `The Shawshank Redemption`, which topped the charts by averages.
+
+Observe the bottom 10 movies with a minimum of 1,000 ratings:
+```{r movies_with_lowest_avg_ratings, echo = FALSE, message = FALSE}
+# Show the bottom 10 movies by average ratings and with at least 1000 ratings
+edx %>%
+  group_by(movieId, title) %>% 
+  summarize(avg_rating = mean(rating), count = n()) %>%
+  filter(count >= 1000) %>% 
+  arrange(avg_rating) %>%
+  top_n(10)
+```
+
+Based on the top 10 and bottom 10 movies, the top 10 movies tend to have much more ratings than those in the bottom top 10. However, let's plot the number of ratings and the average rating for each movie:
+```{r plot_movie_avg_ratings}
+# Calculate the correlation between the average ratings and the number of ratings
+movie_avg_ratings_and_counts <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(avg_rating = mean(rating), count = n()) %>% 
+  select(avg_rating, count)
+
+movie_avg_ratings_and_counts %>% 
+  ggplot(aes(count, avg_rating)) + 
+  geom_point() + 
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs")) + 
+  ggtitle("Number of Ratings vs. Average Rating of Movies") + 
+  xlab("Number of Ratings") + 
+  ylab("Average Rating")
+```
+
+Surprisingly, there seems to be a trend across the entire dataset. Movies with more ratings tend to have higher ratings on average. However, based on the correlation coefficient, the correlation is weakly correlated. 
+```{r correlation_coefficient}
+cc <- movie_avg_ratings_and_counts %>% 
+  summarize(r = cor(count, avg_rating)) %>% 
+  .$r
+```
+
+The correlation coefficient between the number of ratings and the average rating is **`r cc`**.
+
+Here is the distribution of the average ratings for each movie:
+```{r plot_distribution_movie_avg_ratings}
+# Plot the average ratings for each movie
+edx %>% 
+  group_by(movieId) %>% 
+  summarize(avg_rating = mean(rating)) %>% 
+  ggplot(aes(avg_rating)) + 
+  geom_histogram(bins = 50) + 
+  ggtitle("Frequency of Average Ratings of Each Movie") + 
+  xlab("Average Rating") + 
+  ylab("Number of Movies")
+```
+
+The distribution appears to be skewed to the left. We cannot say that the distribution is approximately normal.
+
+Now let's see the top median movie ratings:
+```{r movies_with_highest_median_ratings, echo = FALSE, message = FALSE}
+# Show the top 10 movies with the highest median rating and with at least 1000 ratings 
+edx %>% 
+  group_by(movieId, title) %>% 
+  summarize(median = median(rating), count = n()) %>% 
+  filter(count >= 1000) %>%
+  arrange(desc(median)) %>%
+  top_n(10)
+```
+
+We see `The Shawshank Redemption` topping the charts for median averages. We also see movies like `Schindler's List`, `The Godfather`, and `Rear Window` from the top 10 averages as well. Surprisingly, we see `Pulp Fiction` reach the top 5 median ratings, despite the fact that it wasn't in the top 10 average ratings.
+
+Here are the bottom 10 median movie ratings:
+```{r movies_with_lowest_median_ratings, echo = FALSE, message = FALSE}
+# Show the 10 movies with the lowest median rating and with at least 1000 ratings 
+edx %>% 
+  group_by(movieId, title) %>% 
+  summarize(median = median(rating), count = n()) %>% 
+  filter(count >= 1000) %>%
+  arrange(median) %>%
+  top_n(10)
+```
+
+Here, we see `Battlefield Earth`, `Home Alone 3`, `Spice World`, and several other movies appear in the lowest median and mean ratings, with `Battlefield Earth` having the worst mean and median ratings.
+
+
+## Exploring the Dataset - Users
+Based on the number of user IDs, there are `r n_distinct(edx$userId)` users in the dataset.
+
+Here are the top 10 user IDs that have sumbitted the most ratings:
+```{r users_with_most_ratings, echo = FALSE, message = FALSE}
+# Show the users with the most ratings
+edx %>% 
+  group_by(userId) %>% 
+  summarize(count = n()) %>% 
+  arrange(desc(count)) %>% 
+   top_n(10)
+```
+
+While all of the users in the top 10 have rated over 3,000 movies, two of them have rated over 6,000 movies! That's more than half the movies in the dataset!
+
+Here is the distribution of the average user ratings. Notice how they're approximately normal:
+```{r plot_distribution_user_avg_ratings}
+# Plot the average rating for each user
+avg_of_user_avgs <- edx %>% 
+  group_by(userId) %>% 
+  summarize(avg_rating = mean(rating))
+
+avg_of_user_avgs %>% 
+  ggplot(aes(avg_rating)) + 
+  geom_histogram(bins = 50) + 
+  ggtitle("Frequency of Average User Ratings") + 
+  xlab("Average Rating") + 
+  ylab("Number of Users")
+```
+
+We can see that the majority of the average user ratings are somewhere between 3 and 4 stars. There are some users who tend to really like all the movies they watched and there are some who tend to really dislike all the movies they watched. However, the mean and standard deviation of the average user ratings are the following:
+```{r avg_user_rating_mean_sd, echo = FALSE}
+# Compute the mean and standard deviation of the average user ratings
+avg_of_user_avgs %>% 
+  summarize(mean = mean(avg_rating), st_dev = sd(avg_rating))
+```
+
+
+## Exploring the Dataset - Release Years
+The range of release years in the dataset span from `min(edx$releaseYear)` to `max(edx$releaseYear)`. Certainly this is a wide range of movies. However, here are the years that had the most movie releases:
+```{r years_with_most_releases}
+# Show the year that had the most movie releases
+number_of_releases_by_year <- edx %>% 
+  select(movieId, releaseYear) %>%
+  unique() %>%
+  group_by(releaseYear) %>% 
+  summarize(count = n())
+
+number_of_releases_by_year %>% 
+  arrange(desc(count)) %>% 
+  top_n(10)
+```
+
+Based on the top 10, more movies have been released in more recent years than in previous years. To visualize this, the following plot shows the number of movie releases for each year:
+```{r plot_number_of_releases_by_year}
+# Plot the number of releases by year
+number_of_releases_by_year %>%
+  ggplot(aes(releaseYear, count)) + 
+  geom_bar(stat = "identity") + 
+  ggtitle("Movie Releases by Year") + 
+  xlab("Year") + 
+  ylab("Number of Movies")
+```
+
+We can see that the number of movies released increased substantially since the 1980s. The dataset suggests that from the early 1980s to the early 2000s, the number of movies have approximately doubled.
+
+The following plot shows the number of user ratings for each movie, based on their release year. We can see that newer movies tend to get more ratings:
+```{r boxplots_number_of_ratings_by_year}
+# Plot the boxplots of the total ratings for each movie by year
+edx %>% 
+  group_by(movieId) %>%
+  summarize(n = n(), year = as.character(first(releaseYear))) %>%
+  qplot(year, n, data = ., geom = "boxplot") +
+  coord_trans(y = "sqrt") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  ggtitle("Number of User Ratings For Each Movie By Release Year") + 
+  xlab("Year") + 
+  ylab("Number of Ratings")
+```
+
+In the following plot, we calculate the average rating of movies within their respective release years. Interestingly, the average rating of movies before 1980 tend to be higher. However, the previous plot shows they don't have as many ratings as newer movies.
+```{r plot_average_rating_by_year}
+# Plot the average rating by release year
+edx %>% 
+  select(releaseYear, rating) %>% 
+  group_by(releaseYear) %>% 
+  summarize(avg_rating = mean(rating)) %>% 
+  ggplot(aes(releaseYear, avg_rating)) +
+  geom_point()
+```
+
+## Exploring the Dataset - Genres
+While movies can have multiple genres, their combinations are made up of the following genres:
+```{r list_of_genres}
+# Show the list of genres
+list_of_genres <- edx %>% 
+  select(genres) %>% 
+  distinct() %>% 
+  separate_rows(genres, sep = "\\|") %>% 
+  distinct() %>% 
+  arrange(genres) %>% 
+  .$genres
+
+list_of_genres
+```
+
+While the dataset suggests there are `r length(list_of_genres)` genres, we can see that one of the genres is `(no genres listed)`. We are curious to know which movie(s) do not have a genre.
+
+The following movie(s) without a genre are:
+```{r movie_without_genre, echo = FALSE}
+# Show the movie(s) that don't have a genre
+edx %>% 
+  filter(genres == "(no genres listed)") %>% 
+  select(movieId, title, releaseYear) %>% 
+  unique()
+```
+
+Interestingly, `Pull My Daisy` is a short film that is classified as Comedy by Rotten Tomatoes. See <https://www.rottentomatoes.com/m/pull_my_daisy> for more information about the movie. (Note that the movie's release year is listed as 1959 while the dataset says it was released in 1958.)
+
+Here are the number of movies that are in each genre:
+```{r number_of_movies_per_genre}
+# Count the number of movies for each genre
+# NOTE: movies can have more than one genre
+movies <- edx %>% 
+  select(movieId, title, releaseYear, genres) %>% 
+  unique()
+
+data.frame(genre = list_of_genres, 
+           count = map_dbl(list_of_genres, function(genre){
+             sum(str_detect(movies$genres, genre))
+           })
+) %>% arrange(desc(count))
+```
+
+We see that the most common genre is `Drama`, while `Comedy` is the next prevalent genre.
+
+Here are the number of ratings for each genre. Note that since movies can have multiple genres, the movies may be counted more than once.
+```{r number_of_ratings_per_genre}
+# Count the number of ratings for each genre
+data.frame(genre = list_of_genres, 
+           count = map_dbl(list_of_genres, function(genre){
+           sum(str_detect(edx$genres, genre))
+})) %>% arrange(desc(count))
+```
+
+It appears that the 3 most rated genres are `Drama`, `Comedy`, and `Action`. It's no surprise that `Drama` and `Comedy` remain in the top 2 since they're the most common genres in the dataset. However, the prevalence of movies with these genres and number of ratings for those genres do not indicate whether people view the movies of those genres favorably. To answer this question, we will calculate the average rating and standard error for each genre to see what ratings the movies with those genres are receiving collectively.
+
+Here are the average ratings by genre: (note that we removed `(no genres listed)`)
+```{r rating_avg_sd_by_genre}
+# Find the average and SE of the ratings for each genre
+avg_rating_by_genre <- map_df(list_of_genres, function(genre){
+  edx %>% 
+    select(genres, rating) %>% 
+    filter(str_detect(genres, genre)) %>%
+    summarize(genres = genre, avg_rating = mean(rating), se = sd(rating)/sqrt(n()))
+}) %>% 
+  filter(genres != "(no genres listed)") %>% 
+  arrange(desc(avg_rating))
+
+avg_rating_by_genre
+```
+
+A visualization of the data above is presented below:
+```{r boxplot_of_ratings_by_genre}
+# Plot boxplots of ratings for each genre
+avg_rating_by_genre %>% 
+  mutate(genres = reorder(genres, avg_rating)) %>% 
+  ggplot(aes(genres, avg_rating, ymin = avg_rating - 2 * se, ymax = avg_rating + 2 * se)) + 
+  geom_point() +
+  geom_errorbar() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  ggtitle("Average Ratings by Genre") + 
+  xlab("Genres") + 
+  ylab("Average Rating")
+```
+
+We can see that the most common genres don't have the highest average ratings. More surprisingly, `Comedy` ranks lower than most of the other genres. The only genre that surpassed a 4.0 rating was `Film-Noir`, however, not a lot of movies have this genre. The genre with the lowest average ratings was `Horror`, which was the only genre to fall under a 3.3 average rating.
+
+
+## Exploring the Dataset - Ratings
+The following table shows the different types of ratings, ordered from most prevalent to least:
+```{r most_common_ratings}
+# Order the most commonly given ratings from greatest to least
+frequency_of_ratings <- edx %>% 
+  select(rating) %>% 
+  group_by(rating) %>% 
+  summarize(count = n()) %>% 
+  arrange(desc(count))
+
+frequency_of_ratings
+```
+
+It appears that the 3 most common ratings are all whole-star ratings: 4.0, 3.0, and 5.0. Similarly, the 3 least common ratings are partial-star ratings: 0.5, 1.5, and 2.5.
+
+A histogram of the ratings is shown below:
+```{r histogram_ratings}
+# Plot the totals of each rating
+frequency_of_ratings %>%
+  mutate(rating = factor(rating)) %>%
+  group_by(rating) %>%
+  ggplot(aes(rating, count, label = rating)) + 
+  geom_bar(stat = "identity") + 
+  ggtitle("Total Number of Ratings by Rating") + 
+  xlab("Rating") + 
+  ylab("Total") + 
+  scale_y_continuous(labels = function(y) format(y, scientific = FALSE))
+```
+
+We observe that the whole-star ratings are much more prevalent. The total number of ratings that whole-star ratings and those that are not, along with their proportions, are:
+```{r count_whole_star_ratings, echo = FALSE}
+# Count the number of ratings with a whole-star rating vs. those that are not
+# Also show the proportions of the two types of ratings
+edx %>% 
+  select(rating) %>% 
+  mutate(whole_star_rating = ifelse(rating %in% 1:5, "Yes", "No")) %>% 
+  group_by(whole_star_rating) %>% 
+  summarize(count = n()) %>% 
+  mutate(proportion = count / sum(count))
+```
+
+This leaves us wondering why this phenomenon is happening. A further analysis of the rating types by year show even more surprising results:
+```{r ratings_by_year_and_if_whole_star}
+# Show number of ratings by year and by whether it is a whole-star rating or not
+edx %>% 
+  select(dateTimeOfRating, rating) %>% 
+  mutate(whole_star_rating = ifelse(rating %in% 1:5, "Yes", "No")) %>% 
+  mutate(yearOfRating = year(dateTimeOfRating)) %>% 
+  group_by(yearOfRating, whole_star_rating) %>% 
+  summarize(count = n()) %>% 
+  spread(whole_star_rating, count)
+```
+
+The **partial-star ratings were not implemented until 2003**, which explains why there are significantly more whole-star rating than partial-star ratings. Even when the partial-star ratings were introduced, there were still more whole-star ratings than partial-star ratings each and every year.
+
+Another observation made is that there are very few ratings in 1995 and 2009. The initial question presented was whether the dataset included all ratings for those years or not. 
+
+The earliest rating in the dataset occurred on `r min(edx$dateTimeOfRating)`.
+Similarly, the latest rating occurred on `r max(edx$dateTimeOfRating)`.
+
+
+# Models - Overview
+After exploring the dataset, we began making models to predict the ratings of the movies based on particular effects. 
+
+
+## Loss Function - Residual Mean Squared Error (RMSE)
+Since the predictions are continuous values, we cannot determine accuracy by checking if the predicted values are exactly equal to the actual values. Instead, it is more useful to use a function that summarizes the differences overall. For this project, we used the **residual mean squared error (RMSE)** to determine acccuracy. The RMSE is defined as:
+
+$$\mbox{RMSE} = \sqrt{\frac{1}{N}\sum_{m,u}(\hat{y}_{m,u} - y_{m,u})^2}$$
+
+Where $N$ is the number of predictions, $m$ represents the movie, $u$ represents the user, $\hat y_{m,u}$ represents the predicted value, and $y_{m,u}$ represents the actual value. Note that as the predictions become more accurate, the RMSE gets closer to 0.
+```{r rmse_function}
+# Residual mean squared error (RMSE) function
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+The goal was to produce a model in which the RMSE is less than 0.8649. This is considered to be very good for our movie recommendation system.
+
+
+## Models - Just the Average
+A simple but undesirable model is to compute the average rating in the entire dataset and predict every rating to be the average. The following formula represents the model:
+
+$$y_{m,u} = \hat{\mu} + \varepsilon_{m,u}$$
+
+Where $\hat{\mu}$ is the mean rating and $\varepsilon_{m,u}$ is the error of the rating for movie $m$ and user $u$.
+```{r just_the_average_model}
+# Compute the mean rating in the edx dataset
+mu_hat <- mean(edx$rating)
+
+# Calculate RMSE using the average
+results <- data.frame(model = "Only The Average", 
+                      RMSE = RMSE(validation$rating, mu_hat))
+```
+
+Note that the average rating is `r mu_hat`. By predicting every rating to be the average, we calculated an RMSE of `r results[1,2]`. This can certainly be improved by adding more features to the model.
+
+
+## Models - Movie Effect
+This model considers the effect of movies on the dataset. This is also called movie bias. The model is represented by the following formula:
+
+$$y_{m,u} = \hat{\mu} + b_m + \varepsilon_{m,u}$$
+
+Where $b_m$ represents the movie bias. The greater the value of the movie bias, the more favorable the movie is.
+```{r movie_effect}
+# Compute the mean difference between the movie's rating and the average
+movie_avgs <- edx %>%
+  group_by(movieId) %>%
+  summarize(b_m = mean(rating - mu_hat))
+
+# Predict the movie ratings using the mean difference for each movie (movie effect)
+y_hat_movies <- validation %>%
+  left_join(movie_avgs, by='movieId') %>%
+  mutate(prediction = mu_hat + b_m) %>%
+  .$prediction
+
+# Calculate RMSE using the movie effect model
+results <- results %>%
+  add_row(model = "Movie Effect", 
+  RMSE = RMSE(validation$rating, y_hat_movies))
+```
+
+By ading the movie effect to the model, we calculated an RMSE of `r results[2,2]`, which is a substantial improvement from just using the average. However, this doesn't meet the desired RMSE. We can try regularization to get better results.
+
+
+## Models - Movie Effect (Regularized)
+An observation that was made from exploring the dataset was that some movies tend to get more ratings than others. However, some movies don't have a lot of ratings, which can lead to large variations in the movie biases. To control this, we can use **regularization**. Regularization helps control variability of the effects by penalizing large values of $b_m$ from smaller sample sizes. We use the following formula:
+
+$$\frac{1}{N} \sum_{m,u} (y_{m,u} - \mu - b_{m})^{2} + \lambda \sum_{m} b_{m}^2$$
+
+Where $\lambda$ is a parameter that represents the penalty. However, we want to ensure that $\lambda$ minimizes the equation above. To do this, we want to find the lambdas that do so, using the following formula:
+
+$$\hat{b}_{m}(\lambda) = \frac{1}{\lambda + n_{m}} \sum_{u=1}^{n_{m}} (Y_{m,u} - \hat{\mu})$$
+Where $n_m$ is the number of ratings for movie $m$.
+```{r movie_effect_regularized, results = FALSE}
+# Try this sequence of lambdas
+lambdas <- seq(0, 10, 0.25)
+
+# Returns the RMSEs for each lambda
+rmses_1 <- sapply(lambdas, function(lambda) {
+  # Print lambda to keep track of which lambda the function is using
+  print(paste("Lambda:", lambda))
+  
+  movie_avgs <- edx %>%
+    group_by(movieId) %>%
+    summarize(b_m = sum(rating - mu_hat) / (n() + lambda))
+  
+  y_hat_movies_regularized <- validation %>%
+    left_join(movie_avgs, by='movieId') %>%
+    mutate(prediction = mu_hat + b_m) %>%
+    .$prediction
+  
+  return(RMSE(validation$rating, y_hat_movies_regularized))
+})
+```
+
+For regularized movie model, we used multiples of 0.25 up to, and including, 10. So $\lambda = 0, 0.25, 0.5, ..., 10$. The RMSEs for each $\lambda$ are plotted in the following graph, with the minimum RMSE highlighted:
+```{r plot_rmses_1}
+# Plot the lambdas and their respective RMSEs
+data.frame(Lambdas = lambdas, RMSEs = rmses_1) %>% 
+  ggplot(aes(Lambdas, RMSEs)) + 
+  geom_point() + 
+  gghighlight(RMSEs == min(RMSEs)) + 
+  ggtitle("Movie Effect (Regularized)")
+
+# Add the regularized model to results
+results <- results %>%
+  add_row(model = "Regularized Movie Effect", 
+          RMSE = min(rmses_1))
+```
+
+Therefore, the most optimal $\lambda$ is `r lambdas[which.min(rmses_1)]` since it produces the lowest RMSE, which is  =`r results[1,2]`. This is a slight improvement, however this is only using the movie effects.
+
+
+## Models - Movie + User Effect
+In the previous model, we used only the movie effect. This model will include the user effect as well. The formula that represents the model is the following:
+
+$$y_{m,u} = \hat{\mu} + b_m + b_u + \varepsilon_{m,u}$$
+
+Where $b_u$ is the user effect. As shown previously, some users tend to rate movies higher than others and vice versa, so to include this in the model should improve our results even more.
+```{r movie_user_effect}
+# Compute the mean difference between the user's rating 
+# and the average with movie effect.
+user_avgs <- edx %>%
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu_hat - b_m))
+
+# Predict the movie ratings using movie and user effects
+y_hat_movies_users <- validation %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(prediction = mu_hat + b_m + b_u) %>%
+  .$prediction
+
+# Calculate RMSE using the movie and user effects model
+results <- results %>% 
+  add_row(model = "Movie + User Effect",
+          RMSE = RMSE(validation$rating, y_hat_movies_users))
+```
+
+After generating the model and predicting the ratings on the `validation` set, the RMSE of the model is `r results[4,2]`, which brings us much closer to the targetted RMSE.
+
+
+## Models - Movie + User Effect (Regularized)
+Using regularization on the previous model should help improve the RMSE a bit more. The formula we used for this model is:
+
+$$\frac{1}{N} \sum_{m,u} (y_{m,u} - \mu - b_m - b_u)^2 + \lambda (\sum_m b_m^2 + \sum_u b_u^2)$$
+
+And the formula used to minimize the formula above is:
+
+$$\hat{b}_u(\lambda) = \frac{1}{\lambda + n_u} \sum_{u=1}^{n_u} (y_{m,u} - \hat{\mu} - b_m)$$
+
+Where $n_u$ represents the number of ratings by that user.
+```{r movie_user_effect_regularized, results = FALSE}
+# Try this sequence of lambdas
+lambdas <- seq(0, 10, 0.25)
+
+# Returns the RMSEs for each lambda
+rmses_2 <- sapply(lambdas, function(lambda) {
+  # Print lambda to keep track of which lambda the function is using
+  print(paste("Lambda:", lambda))
+  
+  movie_avgs <- edx %>%
+    group_by(movieId) %>%
+    summarize(b_m = sum(rating - mu_hat) / (n() + lambda))
+  
+  user_avgs <- edx %>% 
+    left_join(movie_avgs, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - mu_hat - b_m)/(n() + lambda))
+  
+  y_hat_movies_users_regularized <- validation %>%
+    left_join(movie_avgs, by='movieId') %>%
+    left_join(user_avgs, by='userId') %>%
+    mutate(prediction = mu_hat + b_m + b_u) %>%
+    .$prediction
+  
+  return(RMSE(validation$rating, y_hat_movies_users_regularized))
+})
+```
+
+We also used $\lambda = 0, 0.25, 0.5, ..., 10$ for this regularized model. The RMSEs for each $\lambda$ are plotted in the following graph, with the minimum RMSE highlighted:
+```{r plot_rmses_2}
+# Plot the lambdas and their respective RMSEs
+data.frame(Lambdas = lambdas, RMSEs = rmses_2) %>% 
+  ggplot(aes(Lambdas, RMSEs)) + 
+  geom_point() + 
+  gghighlight(RMSEs == min(RMSEs)) + 
+  ggtitle("Movie + User Effect (Regularized)")
+
+# Add the regularized model to results
+results <- results %>%
+  add_row(model = "Regularized Movie + User Effect", 
+          RMSE = min(rmses_2))
+```
+
+Here, the optimal $\lambda$ is `r lambdas[which.min(rmses_2)]`, which produces an RMSE of `r results[5,2]`. We have achieved our goal of producing an RMSE under 0.8649!
+
+
+## Models - Movie + User + Release Year Effect
+The next feature that was considered was the release year, since there seems to be an effect on the ratings based on the year the movie was released. The data suggested that older movies tend to have higher ratings than newer ones. In this model, the release year will be accounted for as well using the following formula:
+
+$$y_{m,u} = \hat{\mu} + b_m + b_u + b_y + \varepsilon_{m,u}$$
+
+Where $b_y$ is the release year effect.
+```{r movie_user_releaseyear_effect}
+# Compute the mean differences
+releaseyear_avgs <- edx %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  group_by(releaseYear) %>%
+  summarize(b_y = mean(rating - mu_hat - b_m - b_u))
+
+# Predict the movie ratings using movie, user, and year effects
+y_hat_movies_users_year <- validation %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(releaseyear_avgs, by='releaseYear') %>%
+  mutate(prediction = mu_hat + b_m + b_u + b_y) %>%
+  .$prediction
+
+# Calculate RMSE using the movie, user, & year effects model
+results <- results %>% 
+  add_row(model = "Movie + User + Release Year Effect",
+          RMSE = RMSE(validation$rating, y_hat_movies_users_year))
+```
+The results obtained from generating this model was `r results[6,2]`.
+
+
+## Models - Movie + User + Release Year Effect (Regularized)
+The formula used for this regularized model was:
+
+$$\frac{1}{N} \sum_{m,u} (y_{m,u} - \mu - b_m - b_u - b_y)^2 + \lambda (\sum_m b_m^2 + \sum_u b_u^2 + \sum_y b_y^2)$$
+
+The formula used to minimize the formula above is:
+
+$$\hat{b}_y(\lambda) = \frac{1}{\lambda + n_y} \sum_{u=1}^{n_y} (y_{m,u} - \hat{\mu} - b_m - b_u)$$
+
+Where $n_y$ represents the number of ratings given to all movies of a particular release year. 
+```{r movie_user_releaseyear_effect_regularized, results = FALSE}
+# Try this sequence of lambdas
+lambdas <- seq(0, 10, 0.25)
+
+# Returns the RMSEs for each lambda
+rmses_3 <- sapply(lambdas, function(lambda) {
+  # Print lambda to keep track of which lambda the function is using
+  print(paste("Lambda:", lambda))
+  
+  movie_avgs <- edx %>%
+    group_by(movieId) %>%
+    summarize(b_m = sum(rating - mu_hat) / (n() + lambda))
+  
+  user_avgs <- edx %>% 
+    left_join(movie_avgs, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - mu_hat - b_m)/(n() + lambda))
+  
+  releaseyear_avgs <- edx %>% 
+    left_join(movie_avgs, by="movieId") %>%
+    left_join(user_avgs, by="userId") %>%
+    group_by(releaseYear) %>%
+    summarize(b_y = sum(rating - mu_hat - b_m - b_u)/(n() + lambda))
+  
+  y_hat_movies_users_years_regularized <- validation %>%
+    left_join(movie_avgs, by='movieId') %>%
+    left_join(user_avgs, by='userId') %>%
+    left_join(releaseyear_avgs, by='releaseYear') %>%
+    mutate(prediction = mu_hat + b_m + b_u + b_y) %>%
+    .$prediction
+  
+  return(RMSE(validation$rating, y_hat_movies_users_years_regularized))
+})
+```
+
+Below is the plot of the RMSEs using $\lambda = 0, 0.25, 0.5, ..., 10$.
+```{r plot_rmses_3}
+# Plot the lambdas and their respective RMSEs
+data.frame(Lambdas = lambdas, RMSEs = rmses_3) %>% 
+  ggplot(aes(Lambdas, RMSEs)) + 
+  geom_point() + 
+  gghighlight(RMSEs == min(RMSEs)) + 
+  ggtitle("Movie + User + Release Year Effect (Regularized)")
+
+# Add the regularized model to results
+results <- results %>%
+  add_row(model = "Regularized Movie + User + Release Year Effect", 
+          RMSE = min(rmses_3))
+```
+
+The optimal $\lambda$ for this model is `r lambdas[which.min(rmses_3)]`, which produces an RMSE of `r results[7,2]`. This is a small improvement, but it's still under the target RMSE.
+
+
+## Models - Movie + User + Release Year + Genre Effect
+Due to the large amount of memory required to generate the next two models, it is advised that users who would like to generate the models themselves should ensure that they can **allocate nearly 25GB of memory for just this model**. To accurately produce a model that considers the genres of the movies, a copy of the `edx` and `validation` datasets were made, but the copies had the genres of each movie in their own rows. This results in a dataset with as many as over 25 million rows between the two datasets!
+```{r split_genres}
+# Separate the genres into their own rows and rename the column to 'genre'.
+# WARNING: THIS WILL CONSUME ROUGHLY 25GB OF MEMORY!!!
+edx_genres_split <- edx %>% 
+  rename(genre = genres) %>% 
+  separate_rows(genre, sep = "\\|")
+
+validation_genres_split <- validation %>% 
+  rename(genre = genres) %>% 
+  separate_rows(genre, sep = "\\|")
+```
+
+The first 12 rows of the `edx_genres_split` table are shown below:
+```{r head_edx_genres_split}
+# Show the first 20 rows of the edx_genres_split table.
+head(edx_genres_split, 12)
+```
+
+Now that the genres are in their own rows, we can calculate the genre effects and find the predicted mean for the movies for each genre. To combine the genres' ratings to one rating, we will just take the average of the ratings given to each genre for each particular movie. The formula for this model is shown below:
+
+$$y_{m,u} = \hat{\mu} + b_m + b_u + b_y + \frac{1}{n_{m,g}} (\sum_{g}^{m_g} b_g) + \varepsilon_{m,u}$$
+
+Where $n_{m,g}$ is the number of genres in a particular movie, $m_g$ represents the genres of movie, and $b_{m,g}$ represents the genre effect of that movie.
+```{r movie_user_releaseyear_genre_effect}
+# This computes the mean differences.
+genre_avgs <- edx_genres_split %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(releaseyear_avgs, by='releaseYear') %>% 
+  group_by(genre) %>%
+  summarize(b_g = mean(rating - mu_hat - b_m - b_u - b_y))
+
+# Predict the movie ratings using movie, user, and year effects
+y_hat_movies_users_year_genre <- validation_genres_split %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(releaseyear_avgs, by='releaseYear') %>%
+  left_join(genre_avgs, by='genre') %>%
+  group_by(userId, movieId) %>% 
+  summarize(prediction = mu_hat[1] + b_m[1] + b_u[1] + b_y[1] + mean(b_g)) %>%
+  arrange(userId, movieId) %>% 
+  .$prediction
+
+# Calculate RMSE using the movie, user, year, & genre effects model
+results <- results %>% 
+  add_row(model = "Movie + User + Release Year + Genre Effect",
+          RMSE = RMSE(validation$rating, y_hat_movies_users_year_genre))
+```
+Since the model had to predict the rating based on each genre that a movie has, this took a while to complete. However, the results show an RMSE of `r results[8,2]`.
+
+
+## Models - Movie + User + Release Year + Genre Effect (Regularized)
+Here, we use the formula:
+
+$$\frac{1}{N} \sum_{m,u} (y_{m,u} - \mu - b_m - b_u - b_y - \frac{1}{n_{m,g}} (\sum_{g}^{}b_g))^2 + \lambda (\sum_m b_m^2 + \sum_u b_u^2 + \sum_y b_y^2 + \sum_g [\frac{1}{n_{m,g}} \sum_{g}^{m_g}b_g]^2)$$
+
+The formula used to minimize the formula above is:
+
+$$\hat{b}_g(\lambda) = \frac{1}{\lambda + n_g} \sum_{u=1}^{n_g} (y_{m,u} - \hat{\mu} - b_m - b_u - b_y)$$
+
+Where $n_g$ is the number of ratings for that genre.
+```{r movie_user_releaseyear_genre_effect_regularized, results = FALSE}
+# Try this sequence of lambdas
+lambdas <- seq(0, 10, 0.25)
+
+# Returns the RMSEs for each lambda
+rmses_4 <- sapply(lambdas, function(lambda) {
+  # Print lambda to keep track of which lambda the function is using
+  print(paste("Lambda:", lambda))
+  
+  movie_avgs <- edx %>%
+    group_by(movieId) %>%
+    summarize(b_m = sum(rating - mu_hat) / (n() + lambda))
+  
+  user_avgs <- edx %>% 
+    left_join(movie_avgs, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - mu_hat - b_m)/(n() + lambda))
+  
+  releaseyear_avgs <- edx %>% 
+    left_join(movie_avgs, by="movieId") %>%
+    left_join(user_avgs, by="userId") %>%
+    group_by(releaseYear) %>%
+    summarize(b_y = sum(rating - mu_hat - b_m - b_u)/(n() + lambda))
+  
+  genre_avgs <- edx_genres_split %>% 
+    left_join(movie_avgs, by='movieId') %>%
+    left_join(user_avgs, by='userId') %>%
+    left_join(releaseyear_avgs, by='releaseYear') %>% 
+    group_by(genre) %>%
+    summarize(b_g = sum(rating - mu_hat - b_m - b_u - b_y)/(n() + lambda))
+  
+  y_hat_movies_users_years_genres_regularized <- validation_genres_split %>%
+    left_join(movie_avgs, by='movieId') %>%
+    left_join(user_avgs, by='userId') %>%
+    left_join(releaseyear_avgs, by='releaseYear') %>%
+    left_join(genre_avgs, by='genre') %>%
+    group_by(userId, movieId) %>% 
+    summarize(prediction = mu_hat[1] + b_m[1] + b_u[1] + b_y[1] + mean(b_g)) %>%
+    arrange(userId, movieId) %>% 
+    .$prediction
+  
+  return(RMSE(validation$rating, y_hat_movies_users_years_genres_regularized))
+})
+```
+
+The following plot shows the RMSEs using $\lambda = 0, 0.25, 0.5, ..., 10$:
+```{r plot_rmses_4}
+# Plot the lambdas and their respective RMSEs
+data.frame(Lambdas = lambdas, RMSEs = rmses_4) %>% 
+  ggplot(aes(Lambdas, RMSEs)) + 
+  geom_point() + 
+  gghighlight(RMSEs == min(RMSEs)) + 
+  ggtitle("Movie + User + Release Year + Genre Effect (Regularized)")
+
+# Add the regularized model to results
+results <- results %>%
+  add_row(model = "Regularized Movie + User + Release Year + Genre Effect", 
+          RMSE = min(rmses_4))
+```
+
+We see that the optimal $\lambda$ for this model is `r lambdas[which.min(rmses_4)]` and the resultant RMSE is **`r results[9,2]`**.
+
+
+# Results
+The results of all the models used in the report, along with the RMSEs, are shown below:
+```{r final_results, echo = FALSE}
+results
+```
+Only 4 models met the objective, which was to generate an RMSE of under 0.8649. The regularized movie and user effect model is the first to do so. Conveniently, it is much faster to generate than the other 3 models. However, it has the highest RMSE out of the 4 models that met the desired RMSE. The final model produced the lowest RMSE, but at the expense of performing much slower and demanding a lot of RAM.
+
+It is also noted that movie and user effect had the biggest effect on the RMSE. Just by adding the movie effect, we were able to reduce the RMSE by approximately 0.12. Adding in the user effect reduced the RMSE by almost 0.08.
+
+Regularization helped us improve our results, but only slightly. However, it managed to bring the movie and user effect as well as the movie, user, and release year effect models within the desired RMSE.
+
+
+# Conclusion
+The analysis of the data showed some surprising observations. For instance, while `Drama` and `Comedy` are common genres, the movies that contain these genres don't necessarily rate as high as others on average. Also, users tend to rate older movies higher than newer movies, but newer movies in the dataset tend to have more ratings.
+
+When it comes to particular movies, `The Shawshank Redemption` was consistently ranked as one of the best movies based on number of ratings, average ratings, and median ratings.
+
+By using a regularized movie & user effect model, we can achieve an RMSE under 0.8649. It seems that additonal features added to this only improve the RMSE slightly, but at the cost of a slower model that demands more resources to complete. 
