@@ -1,4 +1,4 @@
-# MovieLens_Recommendation_System
+# MovieLens Recommendation System
 Every day, the demand for data and artifical intelligence is growing. Automation is becoming almost a necessity in today's markets. Predicting outcomes accuracy is also desired, however the results aren't always perfect. Despite this, companies collect data which is then used to implement such systems. In the context of streaming services such as Netflix and Hulu, user ratings for movies are used to build movie reccomendation systems.
 
 In this report, the goal was to **implement a movie reccomendation system** using the MovieLens dataset, which contains about 10 million user ratings. The ratings are represented using a 5-star system, from 1 being the worst rating to 5 being the best. In the dataset, we are also given the movie IDs, the user IDs, the movie title (with the release year attached to them), the genre(s), and the time in which was rating was given. In our analysis, we were able to discover key trends in out dataset's features, such as the variability of ratings across users and genres.
